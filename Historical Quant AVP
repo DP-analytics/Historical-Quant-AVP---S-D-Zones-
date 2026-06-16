@@ -1,0 +1,319 @@
+//@version=6
+indicator("Historical Quant AVP - S/D Zones V6 + MTF & dPOC [DP]", overlay=true, max_boxes_count=500, max_bars_back=5000, max_polylines_count=100)
+
+// --- USTAWIENIA: BAZOWE ---
+anchor_tf = input.string("1D", "Zasięg Profilu (Anchor)", options=["1H", "4H", "1D", "1W"])
+history_count = input.int(2, "Ilość historycznych okresów", minval=0, maxval=5, tooltip="Ile pełnych, zamkniętych okresów w tył chcesz widzieć?")
+rows = input.int(50, "Rozdzielczość (ilość rzędów)", minval=10, maxval=100)
+
+// --- USTAWIENIA: METODY ILOŚCIOWE ---
+hvn_method = input.string("Kwantyle (Percentyl)", "Metoda Obliczeń HVN", options=["Kwantyle (Percentyl)", "Z-Score", "Prominencja (Lokalne Szczyty)"], group="Silnik Statystyczny")
+quantile_pct = input.int(85, "Kwantyle: Poziom Percentyla (np. 85 = top 15%)", minval=50, maxval=99, group="Silnik Statystyczny")
+z_score_val = input.float(1.2, "Z-Score: Odchylenie Standardowe", minval=0.5, step=0.1, group="Silnik Statystyczny")
+
+// --- USTAWIENIA: WIZUALIZACJA ---
+grp_vis = "Wizualizacja"
+poc_transp = input.int(30, "Przezroczystość POC (Najsilniejsza, 0-100)", minval=0, maxval=100, group=grp_vis)
+min_hvn_transp = input.int(85, "Przezroczystość Progu (Najsłabsza, 0-100)", minval=0, maxval=100, group=grp_vis)
+show_vol_data = input.bool(true, "Pokaż Wolumen/Deltę na Strefach", group=grp_vis)
+hide_hist_text = input.bool(true, "Ukryj tekst dla stref historycznych", group=grp_vis)
+
+// NOWE: Ustawienia dPOC
+show_dpoc = input.bool(true, "Pokaż przemieszczanie POC (Developing POC)", group=grp_vis, tooltip="Rysuje ścieżkę migracji POC w trakcie trwania profilu")
+dpoc_color = input.color(color.new(color.orange, 0), "Kolor Linii dPOC", group=grp_vis)
+
+// --- USTAWIENIA: DRUGI POC (MTF) ---
+grp_sec = "Drugi POC (Higher Timeframe)"
+show_sec_poc = input.bool(false, "Włącz Drugi POC", group=grp_sec)
+sec_anchor_tf = input.string("1W", "Zasięg dla 2. POC", options=["1D", "1W", "1M", "3M"], group=grp_sec)
+sec_poc_color = input.color(#FF00FF, "Kolor 2. POC (Fuksja)", group=grp_sec)
+
+// --- DETEKCJA KOTWICY GŁÓWNEJ ---
+get_anchor() =>
+    bool is_new = false
+    if anchor_tf == "1H"
+        is_new := ta.change(time("60")) != 0
+    else if anchor_tf == "4H"
+        is_new := ta.change(time("240")) != 0
+    else if anchor_tf == "1D"
+        is_new := ta.change(time("D")) != 0
+    else if anchor_tf == "1W"
+        is_new := ta.change(time("W")) != 0
+    is_new
+
+// --- DETEKCJA KOTWICY DRUGIEGO POC ---
+get_sec_anchor() =>
+    bool is_new = false
+    if sec_anchor_tf == "1D"
+        is_new := ta.change(time("D")) != 0
+    else if sec_anchor_tf == "1W"
+        is_new := ta.change(time("W")) != 0
+    else if sec_anchor_tf == "1M"
+        is_new := ta.change(time("M")) != 0
+    else if sec_anchor_tf == "3M"
+        is_new := ta.change(time("3M")) != 0
+    is_new
+
+// --- ZARZĄDZANIE PAMIĘCIĄ (HISTORIA) ---
+bool is_anchor = get_anchor()
+bool is_sec_anchor = get_sec_anchor()
+
+var int[] anchor_indices = array.new_int()
+var int[] sec_anchor_indices = array.new_int()
+
+if is_anchor or bar_index == 0
+    array.push(anchor_indices, bar_index)
+    if array.size(anchor_indices) > history_count + 1
+        array.shift(anchor_indices)
+
+if is_sec_anchor or bar_index == 0
+    array.push(sec_anchor_indices, bar_index)
+    if array.size(sec_anchor_indices) > history_count + 1
+        array.shift(sec_anchor_indices)
+
+// Przechowywanie obiektów rysunkowych
+var box[] zoneBoxes = array.new_box()
+var polyline[] dpocLines = array.new<polyline>()
+
+// Mapowanie przezroczystości
+normalize_transp(vol, minVol, maxVol, minOut, maxOut) =>
+    if maxVol == minVol
+        minOut
+    else
+        float mappedValue = maxOut - (( (vol - minVol) / (maxVol - minVol) ) * (maxOut - minOut))
+        math.floor(math.max(mappedValue, 0))
+
+// Formatowanie dużych liczb
+format_volume(v) =>
+    if math.abs(v) >= 1000000
+        str.tostring(v / 1000000, "#.##") + "M"
+    else if math.abs(v) >= 1000
+        str.tostring(v / 1000, "#.##") + "K"
+    else
+        str.tostring(math.round(v))
+
+// --- GŁÓWNA LOGIKA (SILNIK OBLICZENIOWY) ---
+if barstate.islast
+    // Czyszczenie poprzednich rysunków (Strefy)
+    if array.size(zoneBoxes) > 0
+        for b in zoneBoxes
+            box.delete(b)
+        array.clear(zoneBoxes)
+        
+    // Czyszczenie poprzednich rysunków (Linie dPOC)
+    if array.size(dpocLines) > 0
+        for pl in dpocLines
+            polyline.delete(pl)
+        array.clear(dpocLines)
+        
+    int num_anchors = array.size(anchor_indices)
+    
+    // ==========================================
+    // 1. OBLICZANIE GŁÓWNEGO PROFILU
+    // ==========================================
+    if num_anchors > 0
+        for a = 0 to num_anchors - 1
+            int start_idx = array.get(anchor_indices, a)
+            bool is_current_period = (a == num_anchors - 1)
+            int end_idx = is_current_period ? bar_index : array.get(anchor_indices, a + 1) - 1
+            int right_edge = is_current_period ? bar_index + 15 : end_idx
+            
+            int bars_back_start = bar_index - start_idx
+            int bars_back_end = bar_index - end_idx
+            
+            if bars_back_start > 4900
+                continue
+                
+            if bars_back_start >= bars_back_end
+                float maxP = nz(high[bars_back_end])
+                float minP = nz(low[bars_back_end])
+                for i = bars_back_end to bars_back_start
+                    maxP := math.max(maxP, nz(high[i]))
+                    minP := math.min(minP, nz(low[i]))
+                    
+                float step = (maxP - minP) / rows
+                if step == 0
+                    step := syminfo.mintick
+                    
+                float[] current_levels = array.new_float(rows + 1, 0.0)
+                float[] current_vol = array.new_float(rows, 0.0)
+                float[] current_delta = array.new_float(rows, 0.0) 
+                
+                for i = 0 to rows
+                    array.set(current_levels, i, minP + step * i)
+                    
+                // Zmienne do śledzenia dPOC w czasie
+                float max_vol_so_far = 0.0
+                int current_dpoc_idx = 0
+                chart.point[] dpoc_pts = array.new<chart.point>()
+                    
+                // Akumulacja Wolumenu CHRONOLOGICZNIE
+                for i = bars_back_start to bars_back_end
+                    float v = nz(volume[i], 0)
+                    float h = nz(high[i])
+                    float l = nz(low[i])
+                    float c = nz(close[i])
+                    
+                    if v > 0
+                        // 1. OBLICZANIE KOSZYKÓW DLA DANEJ ŚWIECY
+                        int low_idx = math.floor((l - minP) / step)
+                        int high_idx = math.floor((h - minP) / step)
+                        
+                        low_idx := math.max(math.min(low_idx, rows - 1), 0)
+                        high_idx := math.max(math.min(high_idx, rows - 1), 0)
+                        
+                        int span = high_idx - low_idx + 1
+                        float vol_per_bin = v / span
+                        
+                        // 2. APROKSYMACJA DELTY NA BAZIE POZYCJI ZAMKNIĘCIA
+                        float range_hl = math.max(h - l, syminfo.mintick)
+                        float buy_pct = (c - l) / range_hl
+                        float sell_pct = 1.0 - buy_pct
+                        float delta_value = (v * buy_pct) - (v * sell_pct)
+                        float delta_per_bin = delta_value / span
+                        
+                        // 3. FRAKCYJNA DYSTRYBUCJA WOLUMENU PO KOSZYKACH
+                        for b_idx = low_idx to high_idx
+                            float curr_v = array.get(current_vol, b_idx)
+                            float updated_v = curr_v + vol_per_bin
+                            array.set(current_vol, b_idx, updated_v)
+                            
+                            float curr_d = array.get(current_delta, b_idx)
+                            array.set(current_delta, b_idx, curr_d + delta_per_bin)
+                            
+                            // Śledzenie rozwijającego się POC (dPOC)
+                            if updated_v > max_vol_so_far
+                                max_vol_so_far := updated_v
+                                current_dpoc_idx := b_idx
+                        
+                        // Dodawanie punktów do rysowania linii dPOC na wykresie
+                        if show_dpoc
+                            float dpoc_price = minP + step * current_dpoc_idx + (step / 2.0)
+                            array.push(dpoc_pts, chart.point.from_index(bar_index - i, dpoc_price))
+                        
+                // Zapisanie gotowej linii przemieszczenia POC
+                if show_dpoc and array.size(dpoc_pts) > 1
+                    array.push(dpocLines, polyline.new(dpoc_pts, curved=false, line_color=dpoc_color, line_width=2))
+                    
+                float avgVol = array.sum(current_vol) / rows
+                float pocVol = array.max(current_vol)
+                int pocIdx = array.indexof(current_vol, pocVol)
+                
+                float hvnThreshold = 0.0
+                if hvn_method == "Kwantyle (Percentyl)"
+                    float[] sorted_vol = array.copy(current_vol)
+                    array.sort(sorted_vol)
+                    int pct_idx = math.floor((rows - 1) * (quantile_pct / 100.0))
+                    hvnThreshold := array.get(sorted_vol, pct_idx)
+                else if hvn_method == "Z-Score"
+                    float sum_sq = 0.0
+                    for v in current_vol
+                        sum_sq += math.pow(v - avgVol, 2)
+                    float stdev = math.sqrt(sum_sq / rows)
+                    hvnThreshold := avgVol + (z_score_val * stdev)
+                else if hvn_method == "Prominencja (Lokalne Szczyty)"
+                    hvnThreshold := avgVol
+                    
+                for i = 0 to rows - 1
+                    float cVol = array.get(current_vol, i)
+                    float cDelta = array.get(current_delta, i)
+                    
+                    bool is_local_max = true
+                    if hvn_method == "Prominencja (Lokalne Szczyty)"
+                        float prev_v = i > 0 ? array.get(current_vol, i - 1) : 0.0
+                        float next_v = i < rows - 1 ? array.get(current_vol, i + 1) : 0.0
+                        is_local_max := (cVol > prev_v) and (cVol >= next_v)
+                    
+                    if cVol >= hvnThreshold and cVol > 0 and (hvn_method != "Prominencja (Lokalne Szczyty)" or is_local_max)
+                        float levelLow = array.get(current_levels, i)
+                        float levelHigh = array.get(current_levels, i + 1)
+                        
+                        string zoneType = ""
+                        color baseColor = color.gray
+                        
+                        int dynamicTransp = normalize_transp(cVol, hvnThreshold, pocVol, poc_transp, min_hvn_transp)
+                        
+                        if i == pocIdx
+                            zoneType := "POC"
+                            baseColor := #FFD700
+                        else if levelHigh > close
+                            zoneType := "SUPPLY"
+                            baseColor := color.red
+                        else
+                            zoneType := "DEMAND"
+                            baseColor := color.teal
+                        
+                        string zoneText = zoneType
+                        if show_vol_data
+                            string sign = cDelta > 0 ? "+" : ""
+                            zoneText += " [Vol: " + format_volume(cVol) + " | Δ: " + sign + format_volume(cDelta) + "]"
+                            
+                        if not is_current_period and hide_hist_text
+                            zoneText := ""
+                            
+                        color finalColor = color.new(baseColor, dynamicTransp)
+                        
+                        box newBox = box.new(left=start_idx, top=levelHigh, right=right_edge, bottom=levelLow, border_color=color.new(finalColor, 100), bgcolor=finalColor, text=zoneText, text_color=color.white, text_size=size.tiny, text_halign=text.align_right)
+                        array.push(zoneBoxes, newBox)
+
+    // ==========================================
+    // 2. OBLICZANIE DRUGIEGO POC (HIGHER TIMEFRAME)
+    // ==========================================
+    int num_sec_anchors = array.size(sec_anchor_indices)
+    if show_sec_poc and num_sec_anchors > 0
+        for a = 0 to num_sec_anchors - 1
+            int start_idx = array.get(sec_anchor_indices, a)
+            bool is_current_period = (a == num_sec_anchors - 1)
+            int end_idx = is_current_period ? bar_index : array.get(sec_anchor_indices, a + 1) - 1
+            int right_edge = is_current_period ? bar_index + 15 : end_idx
+            
+            int bars_back_start = bar_index - start_idx
+            int bars_back_end = bar_index - end_idx
+            
+            if bars_back_start > 4900
+                continue
+                
+            if bars_back_start >= bars_back_end
+                float maxP = nz(high[bars_back_end])
+                float minP = nz(low[bars_back_end])
+                for i = bars_back_end to bars_back_start
+                    maxP := math.max(maxP, nz(high[i]))
+                    minP := math.min(minP, nz(low[i]))
+                    
+                float step = (maxP - minP) / rows
+                if step == 0
+                    step := syminfo.mintick
+                    
+                float[] sec_vol = array.new_float(rows, 0.0)
+                
+                for i = bars_back_start to bars_back_end
+                    float v = nz(volume[i], 0)
+                    float h = nz(high[i])
+                    float l = nz(low[i])
+                    
+                    if v > 0
+                        int low_idx = math.floor((l - minP) / step)
+                        int high_idx = math.floor((h - minP) / step)
+                        
+                        low_idx := math.max(math.min(low_idx, rows - 1), 0)
+                        high_idx := math.max(math.min(high_idx, rows - 1), 0)
+                        
+                        int span = high_idx - low_idx + 1
+                        float vol_per_bin = v / span
+                        
+                        // Frakcyjna dystrybucja MTF POC
+                        for b_idx = low_idx to high_idx
+                            array.set(sec_vol, b_idx, array.get(sec_vol, b_idx) + vol_per_bin)
+                    
+                float pocVol = array.max(sec_vol)
+                int pocIdx = array.indexof(sec_vol, pocVol)
+                
+                float pocLow = minP + step * pocIdx
+                float pocHigh = pocLow + step
+                
+                string sec_text = "POC " + sec_anchor_tf
+                if not is_current_period and hide_hist_text
+                    sec_text := ""
+                
+                box secBox = box.new(left=start_idx, top=pocHigh, right=right_edge, bottom=pocLow, border_color=sec_poc_color, bgcolor=color.new(sec_poc_color, 40), text=sec_text, text_color=color.white, text_size=size.tiny, text_halign=text.align_right)
+                array.push(zoneBoxes, secBox)
