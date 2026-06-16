@@ -1,9 +1,9 @@
 //@version=6
-indicator("Historical Quant AVP - S/D Zones V6 + MTF & dPOC [DP]", overlay=true, max_boxes_count=500, max_bars_back=5000, max_polylines_count=100)
+indicator("Historical Quant AVP - S/D Zones V6 + MTF & dPOC [PRO]", overlay=true, max_boxes_count=500, max_bars_back=5000, max_polylines_count=100)
 
 // --- USTAWIENIA: BAZOWE ---
 anchor_tf = input.string("1D", "Zasięg Profilu (Anchor)", options=["1H", "4H", "1D", "1W"])
-history_count = input.int(2, "Ilość historycznych okresów", minval=0, maxval=5, tooltip="Ile pełnych, zamkniętych okresów w tył chcesz widzieć?")
+history_count = input.int(5, "Ilość historycznych okresów", minval=0, maxval=15, tooltip="Limit historii. Uwaga: przy włączonej projekcji stref wykres rysuje dużo obiektów.")
 rows = input.int(50, "Rozdzielczość (ilość rzędów)", minval=10, maxval=100)
 
 // --- USTAWIENIA: METODY ILOŚCIOWE ---
@@ -18,7 +18,12 @@ min_hvn_transp = input.int(85, "Przezroczystość Progu (Najsłabsza, 0-100)", m
 show_vol_data = input.bool(true, "Pokaż Wolumen/Deltę na Strefach", group=grp_vis)
 hide_hist_text = input.bool(true, "Ukryj tekst dla stref historycznych", group=grp_vis)
 
-// NOWE: Ustawienia dPOC
+// --- NOWE USTAWIENIA: PRZECIĄGANIE STREF (PROJEKCJA) ---
+grp_ext = "Projekcja Historycznych Stref (Naked Zones)"
+extend_zones = input.bool(true, "Przeciągaj historyczne strefy do aktualnej ceny", group=grp_ext)
+extend_transp = input.int(90, "Przezroczystość projekcji (0-100, zalecana wysoka)", minval=0, maxval=100, group=grp_ext)
+
+// Ustawienia dPOC
 show_dpoc = input.bool(true, "Pokaż przemieszczanie POC (Developing POC)", group=grp_vis, tooltip="Rysuje ścieżkę migracji POC w trakcie trwania profilu")
 dpoc_color = input.color(color.new(color.orange, 0), "Kolor Linii dPOC", group=grp_vis)
 
@@ -71,11 +76,9 @@ if is_sec_anchor or bar_index == 0
     if array.size(sec_anchor_indices) > history_count + 1
         array.shift(sec_anchor_indices)
 
-// Przechowywanie obiektów rysunkowych
 var box[] zoneBoxes = array.new_box()
 var polyline[] dpocLines = array.new<polyline>()
 
-// Mapowanie przezroczystości
 normalize_transp(vol, minVol, maxVol, minOut, maxOut) =>
     if maxVol == minVol
         minOut
@@ -83,7 +86,6 @@ normalize_transp(vol, minVol, maxVol, minOut, maxOut) =>
         float mappedValue = maxOut - (( (vol - minVol) / (maxVol - minVol) ) * (maxOut - minOut))
         math.floor(math.max(mappedValue, 0))
 
-// Formatowanie dużych liczb
 format_volume(v) =>
     if math.abs(v) >= 1000000
         str.tostring(v / 1000000, "#.##") + "M"
@@ -94,19 +96,18 @@ format_volume(v) =>
 
 // --- GŁÓWNA LOGIKA (SILNIK OBLICZENIOWY) ---
 if barstate.islast
-    // Czyszczenie poprzednich rysunków (Strefy)
     if array.size(zoneBoxes) > 0
         for b in zoneBoxes
             box.delete(b)
         array.clear(zoneBoxes)
         
-    // Czyszczenie poprzednich rysunków (Linie dPOC)
     if array.size(dpocLines) > 0
         for pl in dpocLines
             polyline.delete(pl)
         array.clear(dpocLines)
         
     int num_anchors = array.size(anchor_indices)
+    int current_bar_edge = bar_index + 15 // Globalny prawy margines (teraźniejszość)
     
     // ==========================================
     // 1. OBLICZANIE GŁÓWNEGO PROFILU
@@ -116,7 +117,7 @@ if barstate.islast
             int start_idx = array.get(anchor_indices, a)
             bool is_current_period = (a == num_anchors - 1)
             int end_idx = is_current_period ? bar_index : array.get(anchor_indices, a + 1) - 1
-            int right_edge = is_current_period ? bar_index + 15 : end_idx
+            int right_edge = is_current_period ? current_bar_edge : end_idx
             
             int bars_back_start = bar_index - start_idx
             int bars_back_end = bar_index - end_idx
@@ -142,37 +143,37 @@ if barstate.islast
                 for i = 0 to rows
                     array.set(current_levels, i, minP + step * i)
                     
-                // Zmienne do śledzenia dPOC w czasie
                 float max_vol_so_far = 0.0
                 int current_dpoc_idx = 0
                 chart.point[] dpoc_pts = array.new<chart.point>()
                     
-                // Akumulacja Wolumenu CHRONOLOGICZNIE
-                for i = bars_back_start to bars_back_end
+                // NAPRAWA: Zastosowano "by 1" jako dodatnią wartość absolutną skoku. 
+                // Pine Script automatycznie odejmuje, gdy start > end.
+                for i = bars_back_start to bars_back_end by 1
                     float v = nz(volume[i], 0)
                     float h = nz(high[i])
                     float l = nz(low[i])
                     float c = nz(close[i])
                     
                     if v > 0
-                        // 1. OBLICZANIE KOSZYKÓW DLA DANEJ ŚWIECY
                         int low_idx = math.floor((l - minP) / step)
                         int high_idx = math.floor((h - minP) / step)
                         
-                        low_idx := math.max(math.min(low_idx, rows - 1), 0)
-                        high_idx := math.max(math.min(high_idx, rows - 1), 0)
+                        low_idx := math.max(0, math.min(low_idx, rows - 1))
+                        high_idx := math.max(0, math.min(high_idx, rows - 1))
                         
+                        if high_idx < low_idx
+                            high_idx := low_idx
+                            
                         int span = high_idx - low_idx + 1
                         float vol_per_bin = v / span
                         
-                        // 2. APROKSYMACJA DELTY NA BAZIE POZYCJI ZAMKNIĘCIA
                         float range_hl = math.max(h - l, syminfo.mintick)
                         float buy_pct = (c - l) / range_hl
                         float sell_pct = 1.0 - buy_pct
                         float delta_value = (v * buy_pct) - (v * sell_pct)
                         float delta_per_bin = delta_value / span
                         
-                        // 3. FRAKCYJNA DYSTRYBUCJA WOLUMENU PO KOSZYKACH
                         for b_idx = low_idx to high_idx
                             float curr_v = array.get(current_vol, b_idx)
                             float updated_v = curr_v + vol_per_bin
@@ -181,17 +182,14 @@ if barstate.islast
                             float curr_d = array.get(current_delta, b_idx)
                             array.set(current_delta, b_idx, curr_d + delta_per_bin)
                             
-                            // Śledzenie rozwijającego się POC (dPOC)
                             if updated_v > max_vol_so_far
                                 max_vol_so_far := updated_v
                                 current_dpoc_idx := b_idx
                         
-                        // Dodawanie punktów do rysowania linii dPOC na wykresie
                         if show_dpoc
                             float dpoc_price = minP + step * current_dpoc_idx + (step / 2.0)
                             array.push(dpoc_pts, chart.point.from_index(bar_index - i, dpoc_price))
                         
-                // Zapisanie gotowej linii przemieszczenia POC
                 if show_dpoc and array.size(dpoc_pts) > 1
                     array.push(dpocLines, polyline.new(dpoc_pts, curved=false, line_color=dpoc_color, line_width=2))
                     
@@ -253,8 +251,16 @@ if barstate.islast
                             
                         color finalColor = color.new(baseColor, dynamicTransp)
                         
+                        // RYSOWANIE ORYGINALNEJ STREFY W KOTWICY
                         box newBox = box.new(left=start_idx, top=levelHigh, right=right_edge, bottom=levelLow, border_color=color.new(finalColor, 100), bgcolor=finalColor, text=zoneText, text_color=color.white, text_size=size.tiny, text_halign=text.align_right)
                         array.push(zoneBoxes, newBox)
+                        
+                        // --- LOGIKA PRZECIĄGANIA (PROJEKCJI) ---
+                        if not is_current_period and extend_zones
+                            color extColor = color.new(baseColor, extend_transp)
+                            color extBorder = color.new(baseColor, math.min(extend_transp + 15, 100))
+                            box extBox = box.new(left=end_idx, top=levelHigh, right=current_bar_edge, bottom=levelLow, border_color=extBorder, bgcolor=extColor)
+                            array.push(zoneBoxes, extBox)
 
     // ==========================================
     // 2. OBLICZANIE DRUGIEGO POC (HIGHER TIMEFRAME)
@@ -265,7 +271,7 @@ if barstate.islast
             int start_idx = array.get(sec_anchor_indices, a)
             bool is_current_period = (a == num_sec_anchors - 1)
             int end_idx = is_current_period ? bar_index : array.get(sec_anchor_indices, a + 1) - 1
-            int right_edge = is_current_period ? bar_index + 15 : end_idx
+            int right_edge = is_current_period ? current_bar_edge : end_idx
             
             int bars_back_start = bar_index - start_idx
             int bars_back_end = bar_index - end_idx
@@ -286,7 +292,8 @@ if barstate.islast
                     
                 float[] sec_vol = array.new_float(rows, 0.0)
                 
-                for i = bars_back_start to bars_back_end
+                // NAPRAWA: Zastosowano "by 1" również w pętli MTF
+                for i = bars_back_start to bars_back_end by 1
                     float v = nz(volume[i], 0)
                     float h = nz(high[i])
                     float l = nz(low[i])
@@ -295,13 +302,15 @@ if barstate.islast
                         int low_idx = math.floor((l - minP) / step)
                         int high_idx = math.floor((h - minP) / step)
                         
-                        low_idx := math.max(math.min(low_idx, rows - 1), 0)
-                        high_idx := math.max(math.min(high_idx, rows - 1), 0)
+                        low_idx := math.max(0, math.min(low_idx, rows - 1))
+                        high_idx := math.max(0, math.min(high_idx, rows - 1))
                         
+                        if high_idx < low_idx
+                            high_idx := low_idx
+                            
                         int span = high_idx - low_idx + 1
                         float vol_per_bin = v / span
                         
-                        // Frakcyjna dystrybucja MTF POC
                         for b_idx = low_idx to high_idx
                             array.set(sec_vol, b_idx, array.get(sec_vol, b_idx) + vol_per_bin)
                     
@@ -315,5 +324,12 @@ if barstate.islast
                 if not is_current_period and hide_hist_text
                     sec_text := ""
                 
+                // GŁÓWNY BOKS POC Z WYŻSZEGO INTERWAŁU
                 box secBox = box.new(left=start_idx, top=pocHigh, right=right_edge, bottom=pocLow, border_color=sec_poc_color, bgcolor=color.new(sec_poc_color, 40), text=sec_text, text_color=color.white, text_size=size.tiny, text_halign=text.align_right)
                 array.push(zoneBoxes, secBox)
+                
+                // PRZECIĄGANIE HISTORYCZNEGO MTF POC DO TERAZ
+                if not is_current_period and extend_zones
+                    color extSecColor = color.new(sec_poc_color, extend_transp)
+                    box extSecBox = box.new(left=end_idx, top=pocHigh, right=current_bar_edge, bottom=pocLow, border_color=color.new(sec_poc_color, 100), bgcolor=extSecColor)
+                    array.push(zoneBoxes, extSecBox)
