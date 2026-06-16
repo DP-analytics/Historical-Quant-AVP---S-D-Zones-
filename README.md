@@ -1,11 +1,11 @@
 ## Historical Quant AVP
-<img width="1250" height="741" alt="image" src="https://github.com/user-attachments/assets/32e3bf1c-c480-42a0-8f89-89b80e3a89ce" />
+
 
 ## 1. Czym jest ten wskaźnik i jak działa?
 
 Wskaźnik to zaawansowana wersja **Anchored Volume Profile** (Zakotwiczonego Profilu Wolumenu). Zamiast liczyć wolumen dla całego widocznego ekranu, dzieli on czas na ścisłe, zamknięte okresy (np. 1 dzień, 1 tydzień) nazywane **Kotwicami (Anchors)**. Dla każdej kotwicy buduje niezależną mapę dystrybucji wolumenu na osi ceny, a następnie odfiltrowuje rynkowy szum, zostawiając tylko najistotniejsze poziomy płynności (**High Volume Nodes - HVN**).
 
----
+<img width="1250" height="741" alt="image" src="https://github.com/user-attachments/assets/32e3bf1c-c480-42a0-8f89-89b80e3a89ce" />
 
 ## 2. Założenia Matematyczne (Silnik Obliczeniowy)
 
