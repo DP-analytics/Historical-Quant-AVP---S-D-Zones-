@@ -1,6 +1,5 @@
 ## Historical Quant AVP
 
-
 ## 1. Czym jest ten wskaźnik i jak działa?
 
 Wskaźnik to zaawansowana wersja **Anchored Volume Profile** (Zakotwiczonego Profilu Wolumenu). Zamiast liczyć wolumen dla całego widocznego ekranu, dzieli on czas na ścisłe, zamknięte okresy (np. 1 dzień, 1 tydzień) nazywane **Kotwicami (Anchors)**. Dla każdej kotwicy buduje niezależną mapę dystrybucji wolumenu na osi ceny, a następnie odfiltrowuje rynkowy szum, zostawiając tylko najistotniejsze poziomy płynności (**High Volume Nodes - HVN**).
@@ -52,3 +51,11 @@ Złota linia dPOC pokazuje, jak w czasie trwania profilu przemieszczał się "pu
 ### 4. Włączanie MTF POC (Multi-Timeframe)
 Służy do wyłapywania konfluencji. 
 * **Przykład:** Kotwica profilu głównego to `1D`, a Drugi POC ustawiasz na `1W` (tygodniowy). Szukasz na wykresie momentów, gdzie jednodniowa strefa Podaży (Czerwona) nakłada się na fuksjową linię POC z całego tygodnia. To najsilniejsze geometrycznie miejsca do zajmowania pozycji *mean reversion* (powrotu do średniej).
+
+
+Update 16.06.2026 18:27
+Większa historia: Zwiększyłem limit history_count z 5 aż do 30 okien wstecz oraz podniosłem limit obiektów graficznych (max_boxes_count=2000), aby wykres nie ucinał starszych stref. Zmodyfikowałem też pamięć bufora w kodzie, by obsłużył głębsze obliczenia.
+
+Opcjonalne przeciąganie stref (Projekcja): W ustawieniach pojawiła się nowa sekcja. Jeśli funkcja jest włączona, skrypt po narysowaniu głównego historycznego profilu stworzy "przedłużenie" strefy wolumenowej, które sięgnie aż do dzisiejszego dnia.
+
+Subtelna przezroczystość: Nowe, przeciągnięte strefy mają własny suwak przezroczystości (domyślnie bardzo wysoka przezroczystość – 90%), by wskazywać dawne wsparcia/opory, ale nie robić bałaganu na bieżącej akcji cenowej.
