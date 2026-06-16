@@ -1,4 +1,4 @@
-Historical Quant AVP
+## Historical Quant AVP
 <img width="1250" height="741" alt="image" src="https://github.com/user-attachments/assets/32e3bf1c-c480-42a0-8f89-89b80e3a89ce" />
 
 ## 1. Czym jest ten wskaźnik i jak działa?
